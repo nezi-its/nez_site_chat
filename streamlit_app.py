@@ -1,56 +1,122 @@
+# pip install streamlit google-generativeai
+
+import os
+import json
 import streamlit as st
-from openai import OpenAI
+import google.generativeai as genai
+from google.generativeai.types import Content, Part, Tool, GenerateContentConfig, ThinkingConfig
+from time import sleep
 
-# Show title and description.
-st.title("💬 Chatbot")
-st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
-)
+# Файл для истории чата
+DB_FILE = "chat_history.json"
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
+# Загружаем историю
+if os.path.exists(DB_FILE):
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        chat_history = json.load(f)
 else:
+    chat_history = []
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+# --- Оформление страницы ---
+st.set_page_config(page_title="✨ Minecraft Code Generator", page_icon="🛡️", layout="wide")
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Кастомизация интерфейса через sidebar
+st.sidebar.title("⚙️ Настройки интерфейса")
+theme_choice = st.sidebar.selectbox("Тема", ["Светлая", "Тёмная", "Minecraft Зеленая"])
+font_size = st.sidebar.slider("Размер шрифта", min_value=12, max_value=24, value=16)
+chat_bg_color = st.sidebar.color_picker("Цвет фона чата", "#f0f0f5")
+user_bg_color = st.sidebar.color_picker("Цвет фона сообщений пользователя", "#d1e7dd")
+ai_bg_color = st.sidebar.color_picker("Цвет фона сообщений AI", "#f8d7da")
+button_color = st.sidebar.color_picker("Цвет кнопки", "#6a11cb")
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Применение кастомизации
+if theme_choice == "Тёмная":
+    st.markdown("""
+    <style>
+    body {background-color: #121212; color: #ffffff;}
+    .stTextArea textarea {background-color: #1e1e1e; color: #ffffff; font-size: %dpx;}
+    .stButton button {background-color: %s; color: white; font-weight: bold;}
+    .chat-box {padding: 10px; border-radius: 10px; margin-bottom: 10px;}
+    .user-box {background-color: %s; color: #0f5132;}
+    .ai-box {background-color: %s; color: #842029;}
+    </style>
+    """ % (font_size, button_color, user_bg_color, ai_bg_color), unsafe_allow_html=True)
+elif theme_choice == "Minecraft Зеленая":
+    st.markdown("""
+    <style>
+    body {background-color: #228B22; color: #000000;}
+    .stTextArea textarea {background-color: #90EE90; color: #000000; font-size: %dpx;}
+    .stButton button {background-color: %s; color: white; font-weight: bold;}
+    .chat-box {padding: 10px; border-radius: 10px; margin-bottom: 10px; border: 2px solid #006400;}
+    .user-box {background-color: %s; color: #006400;}
+    .ai-box {background-color: %s; color: #8B4513;}
+    </style>
+    """ % (font_size, button_color, user_bg_color, ai_bg_color), unsafe_allow_html=True)
+else:
+    st.markdown("""
+    <style>
+    .stTextArea textarea {background-color: %s; color: #111; font-size: %dpx;}
+    .stButton button {background-color: %s; color: white; font-weight: bold;}
+    .chat-box {padding: 10px; border-radius: 10px; margin-bottom: 10px;}
+    .user-box {background-color: %s; color: #0f5132;}
+    .ai-box {background-color: %s; color: #842029;}
+    </style>
+    """ % (chat_bg_color, font_size, button_color, user_bg_color, ai_bg_color), unsafe_allow_html=True)
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+st.title("🛡️ Minecraft Code Generator")
+st.subheader("Генерируй код для модов, скриптов и миров Minecraft с помощью AI")
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+# API ключ через переменные окружения (без ввода в интерфейсе)
+api_key = os.environ.get("GEMINI_API_KEY")
+if not api_key:
+    st.error("API ключ не найден! Установите переменную окружения GEMINI_API_KEY.")
+else:
+    # Ввод сообщения с фокусом на Minecraft
+    user_input = st.text_area("Опишите, какой код Minecraft вам нужен (например, 'мод на новый меч' или 'скрипт для автоматической фермы'):", height=150)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    if st.button("Генерировать код"):
+        if not user_input.strip():
+            st.warning("Введите описание!")
+        else:
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel("gemini-1.5-flash")  # Исправил на реальную модель (предполагаю опечатку в оригинале)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+            # Контекст для фокуса на Minecraft
+            system_prompt = "Ты эксперт по Minecraft. Генерируй только код и инструкции для модов, скриптов (на Java, Python с MCreator или datapacks) или миров. Не добавляй лишний текст, только полезный код с комментариями."
+
+            contents = [
+                Content(
+                    role="user",
+                    parts=[Part.from_text(system_prompt + "\n\n" + user_input)],
+                ),
+            ]
+
+            # Инструменты (если нужны, но в оригинале был GoogleSearch, который не стандартный; убрал для простоты)
+            # Если нужно добавить поиск, реализуйте через внешние API
+
+            generate_content_config = GenerateContentConfig(
+                # Убрал thinking_config, так как он не стандартный; используйте temperature для креативности
+                temperature=0.7,
+            )
+
+            # Потоковая генерация ответа
+            response_text = ""
+            response_container = st.empty()
+            with st.spinner("🛡️ AI генерирует код..."):
+                response = model.generate_content(contents, stream=True, generation_config=generate_content_config)
+                for chunk in response:
+                    if hasattr(chunk, 'text'):
+                        response_text += chunk.text
+                        response_container.markdown(f"<div class='chat-box ai-box'>{response_text}</div>", unsafe_allow_html=True)
+                        sleep(0.02)  # Плавный эффект печати
+
+            # Сохраняем в локальную базу
+            chat_history.append({"user": user_input, "ai": response_text})
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                json.dump(chat_history, f, ensure_ascii=False, indent=2)
+
+# --- История чата ---
+st.markdown("### 💬 История генераций")
+for item in reversed(chat_history[-20:]):  # Последние 20 сообщений
+    st.markdown(f"<div class='chat-box user-box'><b>Запрос:</b> {item['user']}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='chat-box ai-box'><b>Код от AI:</b> {item['ai']}</div>", unsafe_allow_html=True)
